@@ -1,0 +1,103 @@
+def label = "www-${UUID.randomUUID().toString()}"
+
+/* -------- functions ---------- */
+// def notifySlack(STATUS, COLOR) {
+// 	slackSend (color: COLOR, message: STATUS+" : " +  "${env.JOB_NAME} [${env.BUILD_NUMBER}] (${env.BUILD_URL})")
+// }
+
+// def notifyMail(STATUS, RECIPIENTS) {
+// 	emailext body: STATUS+" : " +  "${env.JOB_NAME} [${env.BUILD_NUMBER}] (${env.BUILD_URL})",
+// 	subject: STATUS + " : " + "${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+// 	to: RECIPIENTS
+// }
+/* ------------------------------ */
+
+def emailRecipients="koreablaster@gmail.com,annguk@wizensoft.com"
+
+//notifySlack("STARTED", "#FFFF00")
+//notifyMail("STARTED", "${emailRecipients}")
+			
+podTemplate(
+	label: label, 
+	containers: [
+        containerTemplate(name: 'git',image: 'alpine/git',command: 'cat',ttyEnabled: true),        
+		//container image는 docker search 명령 이용(docker:stable, API version:1.39)
+		containerTemplate(name: "docker", image: "docker:18.09.8", ttyEnabled: true, command: "cat"),
+		containerTemplate(name: "helm", image: "dtzar/helm-kubectl:2.16.1", ttyEnabled: true, command: "cat")
+	],
+	//volume mount
+	volumes: [
+		hostPathVolume(hostPath: "/var/run/docker.sock", mountPath: "/var/run/docker.sock")
+	]
+) 
+{
+	node(label) {
+		// stage("Get source from gitlab") {
+		// 	git "https://gitlab.com/wizensoft/hello.git"
+		// }
+        stage('Get source from gitlab') {
+            container('git') {
+                checkout([$class: 'GitSCM',
+                    branches: [[name: '*/master']],
+                    userRemoteConfigs: [
+                        [url: 'https://github.com/wizensoft/www.git', credentialsId: 'github']
+                    ],
+                ])
+            }
+        }        
+
+		//-- 환경변수 파일 읽어서 변수값 셋팅
+		def props = readProperties file:"./deploy/pipeline.properties"
+		def tag = props["version"]        
+		def namespace = props["namespace"]
+        def instance = props["instance"]
+		def credentialName = props["credentialName"]
+		def credentialId = props["credentialId"]
+		def dockerHub = props["dockerHub"]
+        def image = "${dockerHub}/${instance}"
+        
+		def baseDeployDir = props["baseDeployDir"]
+		def helmRepository = props["helmRepository"]
+		def helmChartName = props["helmChartName"]
+		def helmChartFile = "${baseDeployDir}/${helmChartName}-${tag}.tgz"
+		def releaseName = props["releaseName"]
+		
+			stage("Buil/push App image") {
+				container("docker") {
+                    withDockerRegistry([credentialsId: "$credentialId", url: "https://$dockerHub" ]) {
+						sh "docker build -f ./deploy/Dockerfile -t ${image}:${tag} ."
+						sh "docker push ${image}:${tag}"
+						sh "docker tag ${image}:${tag} ${image}:latest"
+						// sh "docker push ${image}:latest"
+                        docker.image("$image").push()
+                    }
+				}
+			}
+
+			stage( "Clean up current deployments" ) {
+				container("helm") {
+					try {
+						sh "helm delete ${instance} --purge"		
+					} catch(e) {
+						echo "Clear-up Error : " + e.getMessage()
+						echo "Continue process !"	
+					}
+				}
+			}
+			
+			stage( "Deploy to cluster" ) {
+				container("helm") {
+					echo "Install with chart file !"
+					sh "helm install ./deploy/${instance}-${tag}.tgz --name ${instance} --namespace ${namespace}"
+				}
+			}
+
+			// notifySlack("${currentBuild.currentResult}", "#00FF00")
+			// notifyMail("${currentBuild.currentResult}", "${emailRecipients}")
+		// } catch(e) {
+		// 	currentBuild.result = "FAILED"
+			// notifySlack("${currentBuild.currentResult}", "#FF0000")
+			// notifyMail("${currentBuild.currentResult}", "${emailRecipients}")
+		// }
+	}
+}
